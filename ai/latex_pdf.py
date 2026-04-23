@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from gemini_pacing import gemini_pdf_repair_stagger
 from gemini_report import (
     is_transient_gemini_error_message,
     repair_latex_for_pdflatex_log,
@@ -133,7 +134,7 @@ def compile_latex_pdf_with_repair(
     before a successful strict ``pdflatex`` run.
     """
     key = (gemini_api_key or "").strip() or None
-    model = (gemini_model or "").strip() or "gemini-2.0-flash"
+    model = (gemini_model or "").strip() or "gemini-2.5-flash"
     rounds = max(0, min(int(max_repair_rounds), 5))
     current = tex.strip()
     last_err = ""
@@ -155,7 +156,7 @@ def compile_latex_pdf_with_repair(
         # Rare: provider still returns 503 in the error string after inner retries; wait and retry once more.
         extra = 0
         while rep_err and is_transient_gemini_error_message(rep_err) and extra < 3:
-            time.sleep(min(45.0, 8.0 * (extra + 1)))
+            gemini_pdf_repair_stagger(extra)
             fixed, rep_err = repair_latex_for_pdflatex_log(
                 api_key=key,
                 model=model,

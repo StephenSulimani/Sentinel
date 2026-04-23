@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   Cpu,
@@ -115,6 +115,7 @@ type ReportPayload = {
   npv: number | null;
   discount_rate: number;
   discount_rate_basis?: string | null;
+  discount_rate_source?: string | null;
   fcf_projection: number[];
   warnings: string[];
   steps: ReportStep[];
@@ -126,16 +127,33 @@ type ReportPayload = {
   price_target_horizon_months?: number | null;
   price_target_basis?: string | null;
   headlines?: { title: string; content: string; url: string }[];
+  junior_latex?: string | null;
+  post_peer_junior_latex?: string | null;
+  junior_research_memo?: string | null;
+  post_peer_junior_research_memo?: string | null;
+  investment_recommendation?: string | null;
+  workbook_json_excerpt?: string | null;
+  critic_memo?: string | null;
+  lead_pm_synthesis?: string | null;
 };
 
 function formatReportMode(mode: string | undefined): string {
   if (!mode) return "—";
   const labels: Record<string, string> = {
     gemini: "Narrative model",
+    gemini_memo: "Research memo (Lead PM PDF)",
+    gemini_portfolio: "Multi-agent + Lead PM PDF",
     deterministic: "Templated draft",
     deterministic_yfinance: "Templated draft",
   };
   return labels[mode] ?? mode;
+}
+
+function formatDiscountRowLabel(source: string | null | undefined): string {
+  if (source === "junior_model") return "Discount (Junior)";
+  if (source === "seed_no_key") return "Discount (seed)";
+  if (source === "seed_fallback") return "Discount (seed fallback)";
+  return "Discount (inferred)";
 }
 
 function formatDataSourceLabel(id: string): string {
@@ -150,15 +168,60 @@ function formatDataSourceLabel(id: string): string {
   return labels[id] ?? id;
 }
 
+const AGENT_IDS = [
+  "junior_researcher",
+  "critic",
+  "lead_portfolio_manager",
+] as const;
+
+type AgentId = (typeof AGENT_IDS)[number];
+
+type AgentStripState = "idle" | "running" | "done" | "error";
+
+const AGENT_LABELS_UI: Record<AgentId, string> = {
+  junior_researcher: "Junior Researcher",
+  critic: "The Critic",
+  lead_portfolio_manager: "The Lead Portfolio Manager",
+};
+
+const INITIAL_AGENT_BOARD: Record<AgentId, AgentStripState> = {
+  junior_researcher: "idle",
+  critic: "idle",
+  lead_portfolio_manager: "idle",
+};
+
+function streamAgentLabel(agent: string | undefined): string {
+  if (!agent) return "Pipeline";
+  return AGENT_LABELS_UI[agent as AgentId] ?? agent;
+}
+
+function agentStripBadgeClass(s: AgentStripState): string {
+  if (s === "running")
+    return "border-primary/60 bg-primary/15 text-primary animate-pulse-slow";
+  if (s === "done") return "border-emerald-500/40 bg-emerald-500/10 text-emerald-200";
+  if (s === "error") return "border-destructive/50 bg-destructive/15 text-destructive";
+  return "border-border bg-muted/30 text-muted-foreground";
+}
+
 type StreamEnvelope =
-  | { type: "phase"; id: string; status: string; label?: string; detail?: string }
-  | { type: "reasoning"; text: string; truncated?: boolean }
-  | { type: "reasoning_delta"; text: string }
+  | {
+      type: "phase";
+      id: string;
+      status: string;
+      label?: string;
+      detail?: string;
+      agent?: string;
+    }
+  | { type: "agent_status"; agent: string; status: string; detail?: string }
+  | { type: "gemini_request"; call_site?: string; agent?: string }
+  | { type: "reasoning"; text: string; truncated?: boolean; agent?: string }
+  | { type: "reasoning_delta"; text: string; agent?: string }
   | {
       type: "price_target";
       usd: number;
       horizon_months?: number | null;
       basis?: string;
+      agent?: string;
     }
   | { type: "complete"; report: ReportPayload }
   | { type: "error"; detail: unknown };
@@ -210,6 +273,13 @@ function StatusDot({ state }: { state: ServiceState }) {
   );
 }
 
+function healthTitle(label: string, url: string, state: ServiceState, detail: string) {
+  const status =
+    state === "ok" ? "online" : state === "error" ? "offline" : "checking";
+  const tail = detail.trim() ? ` — ${detail.trim().slice(0, 180)}` : "";
+  return `${label} (${url}): ${status}${tail}`;
+}
+
 const TICKER_PATTERN = /^[A-Za-z0-9.\-]{1,12}$/;
 
 export default function App() {
@@ -221,16 +291,13 @@ export default function App() {
   const [reportError, setReportError] = useState<string>("");
   const [report, setReport] = useState<ReportPayload | null>(null);
   const [streamEvents, setStreamEvents] = useState<string[]>([]);
-  const [reasoningLive, setReasoningLive] = useState<string>("");
+  /** Interleaved phases + streamed reasoning, tagged by agent where the server provides it. */
+  const [agentConversation, setAgentConversation] = useState<string>("");
+  const [geminiRequestsThisRun, setGeminiRequestsThisRun] = useState(0);
+  const [agentBoard, setAgentBoard] =
+    useState<Record<AgentId, AgentStripState>>(INITIAL_AGENT_BOARD);
   const reportStreamRef = useRef<EventSource | null>(null);
-
-  const [discount, setDiscount] = useState("0.10");
-  const [flowsText, setFlowsText] = useState("100, 110, 121, 133.1, 146.41");
-  const [npvResult, setNpvResult] = useState<string>("");
-  const [npvBusy, setNpvBusy] = useState(false);
-
-  const [tex, setTex] = useState<string>("");
-  const [texBusy, setTexBusy] = useState(false);
+  const transcriptAgentRef = useRef<string | null>(null);
 
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfMessage, setPdfMessage] = useState<string>("");
@@ -239,14 +306,6 @@ export default function App() {
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [pdfPreviewBusy, setPdfPreviewBusy] = useState(false);
   const [pdfPreviewError, setPdfPreviewError] = useState<string>("");
-
-  const parseFlows = useMemo(() => {
-    return flowsText
-      .split(/[,\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => Number(s));
-  }, [flowsText]);
 
   useEffect(() => {
     return () => {
@@ -313,7 +372,10 @@ export default function App() {
     setReportError("");
     setReport(null);
     setStreamEvents([]);
-    setReasoningLive("");
+    setAgentConversation("");
+    transcriptAgentRef.current = null;
+    setGeminiRequestsThisRun(0);
+    setAgentBoard({ ...INITIAL_AGENT_BOARD });
     setPdfPreviewUrl((u) => {
       if (u) URL.revokeObjectURL(u);
       return null;
@@ -346,6 +408,28 @@ export default function App() {
         setReportLoading(false);
         return;
       }
+      if (data.type === "agent_status") {
+        const raw = data.agent;
+        if (!(AGENT_IDS as readonly string[]).includes(raw)) return;
+        const aid = raw as AgentId;
+        const next = data.status as AgentStripState;
+        const allowed: AgentStripState[] = ["idle", "running", "done", "error"];
+        setAgentBoard((prev) => ({
+          ...prev,
+          [aid]: allowed.includes(next) ? next : prev[aid],
+        }));
+        const detail =
+          typeof data.detail === "string" && data.detail.trim()
+            ? `\n${data.detail.trim()}`
+            : "";
+        const line = `[${AGENT_LABELS_UI[aid]}] status · ${next}${detail}`;
+        setAgentConversation((prev) => (prev ? `${prev}\n\n${line}` : line));
+        return;
+      }
+      if (data.type === "gemini_request") {
+        setGeminiRequestsThisRun((n) => n + 1);
+        return;
+      }
       if (data.type === "phase") {
         const parts = [
           data.id,
@@ -353,20 +437,41 @@ export default function App() {
           data.label,
           data.detail,
         ].filter(Boolean);
-        setStreamEvents((prev) => [...prev, parts.join(" · ")]);
+        const who =
+          data.agent && typeof data.agent === "string"
+            ? `[${AGENT_LABELS_UI[data.agent as AgentId] ?? data.agent}] `
+            : "";
+        setStreamEvents((prev) => [...prev, `${who}${parts.join(" · ")}`]);
+        const convWho = streamAgentLabel(
+          typeof data.agent === "string" ? data.agent : undefined,
+        );
+        const convLine = `[${convWho}] ${[data.id, data.status, data.label, data.detail].filter(Boolean).join(" · ")}`;
+        setAgentConversation((prev) => (prev ? `${prev}\n\n${convLine}` : convLine));
         return;
       }
       if (data.type === "reasoning") {
-        setReasoningLive((prev) => {
-          const next = prev ? `${prev}\n\n` : "";
-          const tail = data.truncated ? "\n\n[truncated in stream]" : "";
-          return `${next}${data.text}${tail}`;
-        });
+        const lab = streamAgentLabel(
+          typeof data.agent === "string" ? data.agent : undefined,
+        );
+        transcriptAgentRef.current =
+          typeof data.agent === "string" ? data.agent : null;
+        const tail = data.truncated ? "\n\n[truncated in stream]" : "";
+        const block = `── ${lab} · reasoning\n${data.text}${tail}`;
+        setAgentConversation((prev) => (prev ? `${prev}\n\n${block}` : block));
         return;
       }
       if (data.type === "reasoning_delta") {
         if (data.text) {
-          setReasoningLive((prev) => prev + data.text);
+          const agent = typeof data.agent === "string" ? data.agent : null;
+          setAgentConversation((prev) => {
+            let prefix = "";
+            if (agent && agent !== transcriptAgentRef.current) {
+              transcriptAgentRef.current = agent;
+              const lab = streamAgentLabel(agent);
+              prefix = prev ? `\n\n── ${lab} · stream\n` : `── ${lab} · stream\n`;
+            }
+            return `${prev}${prefix}${data.text}`;
+          });
         }
         return;
       }
@@ -375,11 +480,23 @@ export default function App() {
           data.horizon_months != null ? `${data.horizon_months}m horizon` : "horizon n/a";
         const line = `price_target · $${data.usd.toFixed(2)} · ${hm}${data.basis ? ` · ${data.basis.slice(0, 120)}` : ""}`;
         setStreamEvents((prev) => [...prev, line]);
+        const lab = streamAgentLabel(
+          typeof data.agent === "string" ? data.agent : undefined,
+        );
+        const conv = `[${lab}] ${line}`;
+        setAgentConversation((prev) => (prev ? `${prev}\n\n${conv}` : conv));
         return;
       }
       if (data.type === "error") {
         finished = true;
         es.close();
+        setAgentBoard((prev) => {
+          const next = { ...prev };
+          (AGENT_IDS as readonly AgentId[]).forEach((id) => {
+            if (next[id] === "running") next[id] = "error";
+          });
+          return next;
+        });
         const detail =
           typeof data.detail === "string"
             ? data.detail
@@ -398,6 +515,13 @@ export default function App() {
 
     es.onerror = () => {
       if (!finished) {
+        setAgentBoard((prev) => {
+          const next = { ...prev };
+          (AGENT_IDS as readonly AgentId[]).forEach((id) => {
+            if (next[id] === "running") next[id] = "error";
+          });
+          return next;
+        });
         setReportError((prev) =>
           prev || "Report stream disconnected (check AI service / network).",
         );
@@ -498,53 +622,6 @@ export default function App() {
     setOutputTab("pdf");
   }, [aiUrl, report?.latex, report?.ticker]);
 
-  const runNpv = async () => {
-    setNpvBusy(true);
-    setNpvResult("");
-    const rate = Number(discount);
-    if (!Number.isFinite(rate) || rate <= -1) {
-      setNpvResult("discount must be a number > -1");
-      setNpvBusy(false);
-      return;
-    }
-    const flows = parseFlows;
-    if (flows.some((n) => !Number.isFinite(n))) {
-      setNpvResult("cash flows must be numbers");
-      setNpvBusy(false);
-      return;
-    }
-    try {
-      const res = await fetch(`${backendUrl}/npv`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cash_flows: flows,
-          discount_rate: rate,
-        }),
-      });
-      const text = await res.text();
-      setNpvResult(text);
-    } catch (e) {
-      setNpvResult(e instanceof Error ? e.message : "request failed");
-    } finally {
-      setNpvBusy(false);
-    }
-  };
-
-  const loadSampleTex = async () => {
-    setTexBusy(true);
-    setTex("");
-    try {
-      const res = await fetch(`${aiUrl}/report/sample`);
-      const text = await res.text();
-      setTex(res.ok ? text : `error ${res.status}: ${text.slice(0, 400)}`);
-    } catch (e) {
-      setTex(e instanceof Error ? e.message : "request failed");
-    } finally {
-      setTexBusy(false);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_hsl(152_76%_42%/0.12),_transparent_55%),radial-gradient(ellipse_at_bottom,_hsl(215_28%_14%/0.9),_hsl(224_71%_4%))]">
       <header className="border-b border-border/80 bg-card/40 backdrop-blur">
@@ -567,10 +644,39 @@ export default function App() {
               </p>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <div
+              className="flex items-center gap-2 rounded-md border border-border/70 bg-background/50 px-2 py-1.5"
+              role="status"
+              aria-label="Backend service health"
+            >
+              <span
+                className="flex items-center gap-1.5"
+                title={healthTitle("Valuation engine", backendUrl, go.state, go.detail)}
+              >
+                <Server className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                <StatusDot state={go.state} />
+              </span>
+              <span className="h-3 w-px shrink-0 bg-border" aria-hidden />
+              <span
+                className="flex items-center gap-1.5"
+                title={healthTitle("Research API", aiUrl, ai.state, ai.detail)}
+              >
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                <StatusDot state={ai.state} />
+                <span
+                  className="min-w-[1.25rem] text-center font-mono text-[10px] tabular-nums text-muted-foreground"
+                  title="Gemini API calls counted this report run (SSE stream only; PDF repair calls are separate)"
+                  aria-label={`Gemini requests this run: ${geminiRequestsThisRun}`}
+                >
+                  {geminiRequestsThisRun}
+                </span>
+              </span>
+            </div>
             <Button
               variant="outline"
               size="sm"
+              className="shrink-0"
               onClick={() => {
                 void go.ping();
                 void ai.ping();
@@ -594,7 +700,8 @@ export default function App() {
               <CardDescription>
                 Live build via{" "}
                 <span className="font-mono text-foreground">GET /report/stream</span>{" "}
-                (SSE); one-shot JSON at{" "}
+                (SSE): Junior Researcher ↔ The Critic (peer rounds) → Lead Portfolio Manager; one-shot JSON
+                at{" "}
                 <span className="font-mono text-foreground">POST /report/generate</span>.
                 Not investment advice.
               </CardDescription>
@@ -628,8 +735,29 @@ export default function App() {
                 </p>
               ) : null}
 
-              {reportLoading || streamEvents.length > 0 || reasoningLive ? (
-                <div className="grid gap-3 md:grid-cols-2">
+              {reportLoading || streamEvents.length > 0 || agentConversation ? (
+                <div className="space-y-3">
+                  <div className="rounded-md border border-border bg-background/40 p-3">
+                    <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Agents (live)
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {AGENT_IDS.map((id) => (
+                        <div
+                          key={id}
+                          className={`flex min-w-[10rem] flex-1 flex-col gap-0.5 rounded-md border px-2 py-1.5 sm:max-w-[14rem] sm:flex-none ${agentStripBadgeClass(agentBoard[id])}`}
+                        >
+                          <span className="text-[11px] font-medium leading-snug text-foreground/95">
+                            {AGENT_LABELS_UI[id]}
+                          </span>
+                          <span className="font-mono text-[9px] uppercase tracking-wide opacity-90">
+                            {agentBoard[id]}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
                   <div className="rounded-md border border-border bg-background/40 p-3">
                     <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
                       Pipeline (live)
@@ -644,158 +772,22 @@ export default function App() {
                   </div>
                   <div className="rounded-md border border-border bg-background/40 p-3">
                     <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                      Analyst reasoning (live)
+                      Agent conversation (live)
                     </p>
-                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-foreground/90">
-                      {reasoningLive ||
+                    <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-foreground/90">
+                      {agentConversation ||
                         (reportLoading
-                          ? "Waiting for streamed reasoning…"
+                          ? "Waiting for phases and model output…"
                           : "—")}
                     </pre>
+                  </div>
                   </div>
                 </div>
               ) : null}
 
               {report ? (
-                <div className="grid gap-4 lg:grid-cols-12 lg:items-start">
-                  <div className="space-y-2 rounded-md border border-border bg-background/50 p-4 lg:col-span-3">
-                    <p className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                      Summary
-                    </p>
-                    <p className="text-sm font-semibold text-foreground">
-                      {report.company_name}{" "}
-                      <span className="font-mono text-primary">({report.ticker})</span>
-                    </p>
-                    <dl className="mt-3 space-y-2 font-mono text-[11px] text-muted-foreground">
-                      <div className="flex justify-between gap-2">
-                        <dt>Mode</dt>
-                        <dd className="text-foreground">
-                          {formatReportMode(report.report_mode)}
-                        </dd>
-                      </div>
-                      {report.gemini_model ? (
-                        <div className="flex justify-between gap-2">
-                          <dt>Model</dt>
-                          <dd className="text-foreground">{report.gemini_model}</dd>
-                        </div>
-                      ) : null}
-                      <div className="flex justify-between gap-2">
-                        <dt>Illustrative NPV</dt>
-                        <dd className="text-foreground">
-                          {report.npv != null ? report.npv.toLocaleString() : "n/a"}
-                        </dd>
-                      </div>
-                      <div className="flex justify-between gap-2">
-                        <dt>Discount (inferred)</dt>
-                        <dd className="text-foreground">
-                          {(report.discount_rate * 100).toFixed(1)}%
-                        </dd>
-                      </div>
-                      {report.discount_rate_basis ? (
-                        <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
-                          {report.discount_rate_basis}
-                        </p>
-                      ) : null}
-                      {report.price_target_usd != null &&
-                      Number.isFinite(report.price_target_usd) ? (
-                        <>
-                          <div className="flex justify-between gap-2">
-                            <dt>Price target</dt>
-                            <dd className="text-foreground">
-                              ${report.price_target_usd.toLocaleString(undefined, {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
-                            </dd>
-                          </div>
-                          {report.price_target_horizon_months != null ? (
-                            <div className="flex justify-between gap-2">
-                              <dt>PT horizon</dt>
-                              <dd className="text-foreground">
-                                {report.price_target_horizon_months} mo
-                              </dd>
-                            </div>
-                          ) : null}
-                        </>
-                      ) : (
-                        <div className="flex justify-between gap-2">
-                          <dt>Price target</dt>
-                          <dd className="text-muted-foreground">—</dd>
-                        </div>
-                      )}
-                    </dl>
-                    {report.price_target_basis ? (
-                      <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-                        <span className="font-medium text-foreground/90">PT basis: </span>
-                        {report.price_target_basis}
-                      </p>
-                    ) : null}
-                    {report.data_sources?.length ? (
-                      <div className="mt-3 flex flex-wrap gap-1.5">
-                        {report.data_sources.map((s) => (
-                          <span
-                            key={s}
-                            className="rounded border border-border bg-secondary/50 px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
-                          >
-                            {formatDataSourceLabel(s)}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                    {report.warnings.length ? (
-                      <ul className="mt-3 list-disc space-y-1 pl-4 text-xs text-amber-200/90">
-                        {report.warnings.map((w) => (
-                          <li key={w}>{w}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-                    {report.reasoning ? (
-                      <div className="mt-3 rounded-md border border-primary/20 bg-primary/5 p-3">
-                        <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                          Final reasoning
-                        </p>
-                        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/90">
-                          {report.reasoning}
-                        </pre>
-                      </div>
-                    ) : null}
-                    {pdfMessage ? (
-                      <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-2 font-mono text-[10px] text-amber-100/95 whitespace-pre-wrap">
-                        {pdfMessage}
-                      </p>
-                    ) : null}
-                    <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="w-full sm:flex-1"
-                        onClick={downloadTex}
-                      >
-                        <Download className="h-4 w-4" />
-                        Download .tex
-                      </Button>
-                      <Button
-                        variant="default"
-                        size="sm"
-                        className="w-full sm:flex-1"
-                        onClick={() => void downloadPdf()}
-                        disabled={pdfBusy}
-                      >
-                        <FileDown className="h-4 w-4" />
-                        {pdfBusy ? "Building PDF…" : "Download .pdf"}
-                      </Button>
-                    </div>
-                    <p className="mt-2 font-mono text-[10px] text-muted-foreground">
-                      PDF uses server{" "}
-                      <span className="text-foreground">pdflatex</span> plus optional{" "}
-                      <span className="text-foreground">Model</span> repair passes on
-                      compile errors (see{" "}
-                      <span className="text-foreground">GET /health</span> →{" "}
-                      <span className="text-foreground">latex_repair_available</span>
-                      ).
-                    </p>
-                  </div>
-                  <div className="min-w-0 lg:col-span-6">
+                <div className="space-y-6">
+                  <section className="min-w-0 space-y-3 rounded-md border border-border bg-background/50 p-4">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <p className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
                         Report output
@@ -878,151 +870,282 @@ export default function App() {
                         </pre>
                       )}
                     </div>
-                  </div>
-                  <aside className="lg:col-span-3">
-                    <div className="rounded-lg border border-primary/20 bg-gradient-to-b from-card/90 to-card/60 p-3 shadow-md shadow-primary/5 backdrop-blur-sm lg:sticky lg:top-4 lg:max-h-[calc(100vh-5rem)] lg:overflow-y-auto">
-                      <p className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                        <Newspaper className="h-3.5 w-3.5 text-primary" aria-hidden />
-                        Headline scan
+                    {pdfMessage ? (
+                      <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-2 font-mono text-[10px] text-amber-100/95 whitespace-pre-wrap">
+                        {pdfMessage}
                       </p>
-                      <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
-                        Snippets from search; verify at source before relying on them.
+                    ) : null}
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="min-w-0 w-full justify-center gap-2"
+                        onClick={downloadTex}
+                      >
+                        <Download className="h-4 w-4 shrink-0" />
+                        <span className="truncate">Download .tex</span>
+                      </Button>
+                      <Button
+                        variant="default"
+                        size="sm"
+                        className="min-w-0 w-full justify-center gap-2"
+                        onClick={() => void downloadPdf()}
+                        disabled={pdfBusy}
+                      >
+                        <FileDown className="h-4 w-4 shrink-0" />
+                        <span className="truncate">
+                          {pdfBusy ? "Building PDF…" : "Download .pdf"}
+                        </span>
+                      </Button>
+                    </div>
+                    <p className="font-mono text-[10px] text-muted-foreground">
+                      PDF uses server{" "}
+                      <span className="text-foreground">pdflatex</span> plus optional{" "}
+                      <span className="text-foreground">Model</span> repair passes on
+                      compile errors (see{" "}
+                      <span className="text-foreground">GET /health</span> →{" "}
+                      <span className="text-foreground">latex_repair_available</span>
+                      ).
+                    </p>
+                  </section>
+
+                  <div className="grid gap-6 lg:grid-cols-12 lg:items-start">
+                    <div className="min-w-0 space-y-2 rounded-md border border-border bg-background/50 p-4 lg:col-span-6 xl:col-span-7">
+                      <p className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                        Summary
                       </p>
-                      {report.headlines && report.headlines.length > 0 ? (
-                        <ul className="mt-3 space-y-3 border-t border-border/60 pt-3">
-                          {report.headlines.map((h, idx) => (
-                            <li
-                              key={`${h.url || h.title}-${idx}`}
-                              className="rounded-md border border-border/50 bg-background/40 p-2.5 text-[11px] leading-snug"
-                            >
-                              {h.url ? (
-                                <a
-                                  href={h.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="font-medium text-primary hover:underline"
-                                >
-                                  {h.title || "Untitled"}
-                                </a>
-                              ) : (
-                                <span className="font-medium text-foreground">
-                                  {h.title || "Untitled"}
+                      <p className="text-sm font-semibold text-foreground">
+                        {report.company_name}{" "}
+                        <span className="font-mono text-primary">({report.ticker})</span>
+                      </p>
+                      {report.investment_recommendation?.trim() ||
+                      (report.price_target_usd != null &&
+                        Number.isFinite(report.price_target_usd)) ? (
+                        <div className="mt-3 rounded-md border border-primary/35 bg-primary/10 p-3">
+                          <p className="font-mono text-[10px] uppercase tracking-wide text-primary/90">
+                            Desk callout
+                          </p>
+                          {report.investment_recommendation?.trim() ? (
+                            <p className="mt-1 text-base font-bold tracking-tight text-foreground">
+                              {report.investment_recommendation.trim()}
+                            </p>
+                          ) : null}
+                          {report.price_target_usd != null &&
+                          Number.isFinite(report.price_target_usd) ? (
+                            <p className="mt-1 font-mono text-sm text-foreground">
+                              12-m price target:{" "}
+                              <span className="font-semibold">
+                                $
+                                {report.price_target_usd.toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })}
+                              </span>
+                              {report.price_target_horizon_months != null ? (
+                                <span className="text-muted-foreground">
+                                  {" "}
+                                  · {report.price_target_horizon_months} mo horizon
                                 </span>
-                              )}
-                              {h.content ? (
-                                <p className="mt-1.5 text-muted-foreground line-clamp-4">
-                                  {h.content}
-                                </p>
                               ) : null}
-                            </li>
+                            </p>
+                          ) : report.investment_recommendation?.trim() ? (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Price target USD not in payload—open the PDF page-1 box or check
+                              warnings.
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      <dl className="mt-3 space-y-2 font-mono text-[11px] text-muted-foreground">
+                        <div className="flex justify-between gap-2">
+                          <dt>Mode</dt>
+                          <dd className="text-foreground">
+                            {formatReportMode(report.report_mode)}
+                          </dd>
+                        </div>
+                        {report.gemini_model ? (
+                          <div className="flex justify-between gap-2">
+                            <dt>Model</dt>
+                            <dd className="text-foreground">{report.gemini_model}</dd>
+                          </div>
+                        ) : null}
+                        <div className="flex justify-between gap-2">
+                          <dt>Illustrative NPV</dt>
+                          <dd className="text-foreground">
+                            {report.npv != null ? report.npv.toLocaleString() : "n/a"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>{formatDiscountRowLabel(report.discount_rate_source)}</dt>
+                          <dd className="text-foreground">
+                            {(report.discount_rate * 100).toFixed(1)}%
+                          </dd>
+                        </div>
+                        {report.discount_rate_basis ? (
+                          <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
+                            {report.discount_rate_basis}
+                          </p>
+                        ) : null}
+                        {report.price_target_usd != null &&
+                        Number.isFinite(report.price_target_usd) ? (
+                          <>
+                            <div className="flex justify-between gap-2">
+                              <dt>Price target</dt>
+                              <dd className="text-foreground">
+                                ${report.price_target_usd.toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })}
+                              </dd>
+                            </div>
+                            {report.price_target_horizon_months != null ? (
+                              <div className="flex justify-between gap-2">
+                                <dt>PT horizon</dt>
+                                <dd className="text-foreground">
+                                  {report.price_target_horizon_months} mo
+                                </dd>
+                              </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <div className="flex justify-between gap-2">
+                            <dt>Price target</dt>
+                            <dd className="text-muted-foreground">—</dd>
+                          </div>
+                        )}
+                      </dl>
+                      {report.price_target_basis ? (
+                        <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
+                          <span className="font-medium text-foreground/90">PT basis: </span>
+                          {report.price_target_basis}
+                        </p>
+                      ) : null}
+                      {report.data_sources?.length ? (
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {report.data_sources.map((s) => (
+                            <span
+                              key={s}
+                              className="rounded border border-border bg-secondary/50 px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                            >
+                              {formatDataSourceLabel(s)}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {report.warnings.length ? (
+                        <ul className="mt-3 list-disc space-y-1 pl-4 text-xs text-amber-200/90">
+                          {report.warnings.map((w) => (
+                            <li key={w}>{w}</li>
                           ))}
                         </ul>
-                      ) : (
-                        <p className="mt-3 rounded-md border border-dashed border-border/80 bg-muted/10 px-2 py-3 text-center text-[11px] text-muted-foreground">
-                          No headlines for this run (search empty or unavailable).
-                        </p>
-                      )}
+                      ) : null}
+                      {report.reasoning ? (
+                        <div className="mt-3 rounded-md border border-primary/20 bg-primary/5 p-3">
+                          <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                            Junior Researcher — reasoning
+                          </p>
+                          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/90">
+                            {report.reasoning}
+                          </pre>
+                        </div>
+                      ) : null}
+                      {report.critic_memo?.trim() ? (
+                        <div className="mt-3 rounded-md border border-border bg-secondary/20 p-3">
+                          <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                            The Critic — memo
+                          </p>
+                          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/90">
+                            {report.critic_memo}
+                          </pre>
+                        </div>
+                      ) : null}
+                      {(() => {
+                        const lpmStep = report.steps?.find((s) => s.id === "lead_pm");
+                        const fromSynth = report.lead_pm_synthesis?.trim();
+                        const fromStep = lpmStep?.detail?.trim();
+                        const body = fromSynth || fromStep;
+                        if (!body) return null;
+                        const heading = fromSynth
+                          ? "Lead PM — cover synthesis"
+                          : "Lead PM — pass detail";
+                        return (
+                          <div className="mt-3 rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3">
+                            <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                              {heading}
+                            </p>
+                            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/90">
+                              {body}
+                            </pre>
+                          </div>
+                        );
+                      })()}
                     </div>
-                  </aside>
+                    <aside className="min-w-0 lg:col-span-6 xl:col-span-5">
+                      <div className="max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto rounded-lg border border-primary/20 bg-gradient-to-b from-card/90 to-card/60 p-3 shadow-md shadow-primary/5 backdrop-blur-sm xl:sticky xl:top-4">
+                        <p className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                          <Newspaper className="h-3.5 w-3.5 text-primary" aria-hidden />
+                          Headline scan
+                        </p>
+                        <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
+                          Snippets from search; verify at source before relying on them.
+                        </p>
+                        {report.headlines && report.headlines.length > 0 ? (
+                          <ul className="mt-3 space-y-3 border-t border-border/60 pt-3">
+                            {report.headlines.map((h, idx) => (
+                              <li
+                                key={`${h.url || h.title}-${idx}`}
+                                className="rounded-md border border-border/50 bg-background/40 p-2.5 text-[11px] leading-snug"
+                              >
+                                {h.url ? (
+                                  <a
+                                    href={h.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-medium text-primary hover:underline"
+                                  >
+                                    {h.title || "Untitled"}
+                                  </a>
+                                ) : (
+                                  <span className="font-medium text-foreground">
+                                    {h.title || "Untitled"}
+                                  </span>
+                                )}
+                                {h.content ? (
+                                  <p className="mt-1.5 text-muted-foreground line-clamp-4">
+                                    {h.content}
+                                  </p>
+                                ) : null}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="mt-3 rounded-md border border-dashed border-border/80 bg-muted/10 px-2 py-3 text-center text-[11px] text-muted-foreground">
+                            No headlines for this run (search empty or unavailable).
+                          </p>
+                        )}
+                      </div>
+                    </aside>
+                  </div>
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
                   Try <span className="font-mono text-foreground">MSFT</span>,{" "}
                   <span className="font-mono text-foreground">AAPL</span>, or{" "}
-                  <span className="font-mono text-foreground">JPM</span> with
-                  the research stack running (
-                  <span className="font-mono text-foreground">docker compose up</span>
-                  ).
+                  <span className="font-mono text-foreground">JPM</span>
                 </p>
               )}
             </CardContent>
           </Card>
 
-          <Card className="md:col-span-1 xl:col-span-4">
-            <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
-              <div>
-                <CardTitle className="flex items-center gap-2">
-                  <Server className="h-4 w-4 text-primary" />
-                  Valuation engine
-                </CardTitle>
-                <CardDescription className="font-mono text-[11px]">
-                  {backendUrl}
-                </CardDescription>
-              </div>
-              <StatusDot state={go.state} />
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex items-center justify-between rounded-md border border-border bg-background/60 px-3 py-2 font-mono text-xs">
-                <span className="text-muted-foreground">GET /health</span>
-                <span
-                  className={
-                    go.state === "ok"
-                      ? "text-primary"
-                      : go.state === "error"
-                        ? "text-destructive"
-                        : "text-muted-foreground"
-                  }
-                >
-                  {go.state === "ok"
-                    ? "ONLINE"
-                    : go.state === "error"
-                      ? "OFFLINE"
-                      : "…"}
-                </span>
-              </div>
-              <pre className="max-h-28 overflow-auto rounded-md border border-border bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                {go.detail || "—"}
-              </pre>
-            </CardContent>
-          </Card>
-
-          <Card className="md:col-span-1 xl:col-span-4">
-            <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
-              <div>
-                <CardTitle className="flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-primary" />
-                  Research API
-                </CardTitle>
-                <CardDescription className="font-mono text-[11px]">
-                  {aiUrl}
-                </CardDescription>
-              </div>
-              <StatusDot state={ai.state} />
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex items-center justify-between rounded-md border border-border bg-background/60 px-3 py-2 font-mono text-xs">
-                <span className="text-muted-foreground">GET /health</span>
-                <span
-                  className={
-                    ai.state === "ok"
-                      ? "text-primary"
-                      : ai.state === "error"
-                        ? "text-destructive"
-                        : "text-muted-foreground"
-                  }
-                >
-                  {ai.state === "ok"
-                    ? "ONLINE"
-                    : ai.state === "error"
-                      ? "OFFLINE"
-                      : "…"}
-                </span>
-              </div>
-              <pre className="max-h-28 overflow-auto rounded-md border border-border bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                {ai.detail || "—"}
-              </pre>
-            </CardContent>
-          </Card>
-
-          <Card className="md:col-span-2 xl:col-span-4">
+          <Card className="md:col-span-2 xl:col-span-12">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Activity className="h-4 w-4 text-primary" />
                 Pipeline trace
               </CardTitle>
               <CardDescription>
-                Last report build steps (filings → market → discount → FCF →
-                bridge → headlines → narrative → editor).
+                Last report build steps (filings → market → search → headlines →
+                junior discount → FCF → bridge → narrative → editor).
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -1068,81 +1191,10 @@ export default function App() {
               )}
             </CardContent>
           </Card>
-
-          <Card className="md:col-span-2 xl:col-span-7">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 normal-case tracking-normal text-foreground">
-                <Cpu className="h-4 w-4 text-primary" />
-                Scenario NPV
-              </CardTitle>
-              <CardDescription>
-                POST <span className="font-mono text-foreground">/npv</span> with
-                JSON body for ad-hoc scenarios.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="discount">Discount rate</Label>
-                  <Input
-                    id="discount"
-                    value={discount}
-                    onChange={(e) => setDiscount(e.target.value)}
-                    placeholder="0.10"
-                  />
-                </div>
-                <div className="space-y-2 sm:col-span-2">
-                  <Label htmlFor="flows">Cash flows (comma-separated)</Label>
-                  <Input
-                    id="flows"
-                    value={flowsText}
-                    onChange={(e) => setFlowsText(e.target.value)}
-                    placeholder="100, 110, 121"
-                  />
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={() => void runNpv()} disabled={npvBusy}>
-                  {npvBusy ? "Running…" : "Run scenario"}
-                </Button>
-                <Button variant="secondary" onClick={() => void runNpv()}>
-                  Re-run
-                </Button>
-              </div>
-              <pre className="max-h-48 overflow-auto rounded-md border border-border bg-black/40 p-4 font-mono text-xs leading-relaxed text-primary">
-                {npvResult || "—"}
-              </pre>
-            </CardContent>
-          </Card>
-
-          <Card className="md:col-span-2 xl:col-span-5">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 normal-case tracking-normal text-foreground">
-                <FileText className="h-4 w-4 text-primary" />
-                LaTeX template smoke test
-              </CardTitle>
-              <CardDescription>
-                Static sample via{" "}
-                <span className="font-mono text-foreground">GET /report/sample</span>.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Button
-                variant="outline"
-                onClick={() => void loadSampleTex()}
-                disabled={texBusy}
-              >
-                {texBusy ? "Loading…" : "Load sample .tex"}
-              </Button>
-              <pre className="max-h-[28rem] overflow-auto rounded-md border border-border bg-black/40 p-4 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                {tex || "—"}
-              </pre>
-            </CardContent>
-          </Card>
         </div>
       </main>
 
-      <footer className="border-t border-border/60 py-6 text-center text-xs text-muted-foreground">
+      {/* <footer className="border-t border-border/60 py-6 text-center text-xs text-muted-foreground">
         <p className="font-mono">
           Stack:{" "}
           <span className="text-foreground">docker compose up -d</span> +{" "}
@@ -1153,7 +1205,7 @@ export default function App() {
           <span className="text-foreground">.env</span> (see repo{" "}
           <span className="text-foreground">.env.example</span>).
         </p>
-      </footer>
+      </footer> */}
     </div>
   );
 }

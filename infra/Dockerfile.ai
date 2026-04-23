@@ -13,4 +13,6 @@ COPY ai/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY ai/ .
 EXPOSE 8000
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "180", "app:app"]
+# Long narrative runs; ``app.report_stream`` emits SSE comment heartbeats so sync workers
+# are not killed during silent phases. Timeout is a back-stop for truly stuck workers.
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "1800", "--graceful-timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "--log-level", "info", "app:app"]

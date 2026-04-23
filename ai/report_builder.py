@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 from datetime import date
@@ -22,7 +24,15 @@ from price_target import finalize_price_target
 from search_plan import plan_headline_search_queries
 
 TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,12}$")
-_DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+_DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+_log = logging.getLogger(__name__)
+
+
+def _searxng_client_identity_headers() -> dict[str, str]:
+    """Headers many SearXNG botdetection builds expect for JSON API server-to-server calls."""
+    ip = (os.environ.get("SEARXNG_CLIENT_IP") or "127.0.0.1").strip() or "127.0.0.1"
+    return {"X-Forwarded-For": ip, "X-Real-IP": ip}
 
 
 def normalize_ticker(raw: str) -> str:
@@ -99,6 +109,16 @@ class ReportResult:
     price_target_basis: str | None = None
     headlines: list[dict[str, str]] = field(default_factory=list)
     discount_rate_basis: str | None = None
+    discount_rate_source: str | None = None  # junior_model | seed_no_key | seed_fallback
+    # Multi-agent portfolio pipeline (Junior ↔ Critic peer rounds → Lead PM)
+    junior_latex: str | None = None
+    post_peer_junior_latex: str | None = None
+    junior_research_memo: str | None = None
+    post_peer_junior_research_memo: str | None = None
+    investment_recommendation: str | None = None
+    workbook_json_excerpt: str | None = None
+    critic_memo: str | None = None
+    lead_pm_synthesis: str | None = None
 
 
 def _append_step(steps: list[ReportStep], sid: str, label: str, status: str, detail: str = "") -> None:
@@ -170,10 +190,24 @@ def gather_headlines_multi(
     """Run SearXNG once per query, merge, dedupe. Empty list + error if nothing usable."""
     merged: list[dict[str, str]] = []
     errors: list[str] = []
-    for q in queries[:8]:
+    raw_delay = (os.environ.get("SEARXNG_QUERY_DELAY_SEC") or "0.35").strip()
+    try:
+        query_delay = max(0.0, float(raw_delay))
+    except ValueError:
+        query_delay = 0.35
+    for i, q in enumerate(queries[:8]):
         q = q.strip()
         if not q:
             continue
+        if i > 0 and query_delay > 0:
+            time.sleep(query_delay)
+        _log.info(
+            "searxng query %s/%s categories=%r q=%r",
+            i + 1,
+            min(len(queries), 8),
+            categories,
+            q[:120],
+        )
         h, err = searxng_headlines(
             client,
             base_url,
@@ -184,6 +218,9 @@ def gather_headlines_multi(
         merged.extend(h)
         if err:
             errors.append(err)
+            _log.warning("searxng query error: %s", err[:500])
+        else:
+            _log.info("searxng query ok: %s result rows (pre-dedupe)", len(h))
     merged = dedupe_headlines(merged, cap=20)
     if merged:
         return merged, ""
@@ -205,6 +242,7 @@ def searxng_headlines(
         ),
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
+        **_searxng_client_identity_headers(),
     }
     errors: list[str] = []
     for base in searxng_base_url_candidates(base_url):
@@ -470,6 +508,7 @@ def build_equity_report(
             price_target_basis=pt_basis,
             headlines=headlines,
             discount_rate_basis=dr_basis,
+            discount_rate_source=None,
         )
     finally:
         if own_client:
@@ -484,6 +523,7 @@ def result_to_json_dict(res: ReportResult) -> dict[str, Any]:
         "npv": res.npv,
         "discount_rate": res.discount_rate,
         "discount_rate_basis": res.discount_rate_basis,
+        "discount_rate_source": res.discount_rate_source,
         "fcf_projection": res.fcf_projection,
         "warnings": res.warnings,
         "report_mode": res.report_mode,
@@ -494,6 +534,14 @@ def result_to_json_dict(res: ReportResult) -> dict[str, Any]:
         "price_target_horizon_months": res.price_target_horizon_months,
         "price_target_basis": res.price_target_basis,
         "headlines": res.headlines,
+        "junior_latex": res.junior_latex,
+        "post_peer_junior_latex": res.post_peer_junior_latex,
+        "junior_research_memo": res.junior_research_memo,
+        "post_peer_junior_research_memo": res.post_peer_junior_research_memo,
+        "investment_recommendation": res.investment_recommendation,
+        "workbook_json_excerpt": res.workbook_json_excerpt,
+        "critic_memo": res.critic_memo,
+        "lead_pm_synthesis": res.lead_pm_synthesis,
         "steps": [
             {"id": s.id, "label": s.label, "status": s.status, "detail": s.detail}
             for s in res.steps

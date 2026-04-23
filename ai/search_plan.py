@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 from google import genai
 from google.genai import types
 
+from gemini_pacing import gemini_retry_sleep_seconds
 from gemini_report import is_transient_gemini_api_error
+from gemini_stream_events import emit_gemini_request
+
+_log = logging.getLogger(__name__)
 
 _PLAN_SYSTEM = (
     "You help equity researchers plan web search queries. "
@@ -62,6 +68,7 @@ def plan_headline_search_queries(
     company_name: str,
     api_key: str | None,
     model: str,
+    emit: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[str], str | None]:
     """Return ``(queries, planning_error)``.
 
@@ -98,8 +105,10 @@ Return exactly this JSON shape (double quotes, valid JSON):
     )
     text = ""
     max_attempts = 6
+    _log.info("search_plan: calling Gemini model=%r for ticker=%s", model, sym)
     for attempt in range(max_attempts):
         try:
+            emit_gemini_request(emit, call_site="search_plan")
             response = client.models.generate_content(
                 model=model,
                 contents=user,
@@ -108,9 +117,16 @@ Return exactly this JSON shape (double quotes, valid JSON):
             text = (response.text or "").strip()
             break
         except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "search_plan: Gemini error attempt=%s/%s: %s",
+                attempt + 1,
+                max_attempts,
+                exc,
+                exc_info=_log.isEnabledFor(logging.DEBUG),
+            )
             if attempt == max_attempts - 1 or not is_transient_gemini_api_error(exc):
                 return fallback_headline_queries(sym, name), f"search_plan_model: {exc}"
-            time.sleep(min(45.0, 2.0 * (2**attempt)))
+            time.sleep(gemini_retry_sleep_seconds(attempt))
 
     obj = _extract_json_object(text)
     raw_list = obj.get("queries") if isinstance(obj, dict) else None
@@ -129,4 +145,5 @@ Return exactly this JSON shape (double quotes, valid JSON):
     if len(cleaned) < 3:
         return fallback_headline_queries(sym, name), "search_plan_model: too few valid queries"
 
+    _log.info("search_plan: ok %s queries for ticker=%s", len(cleaned), sym)
     return cleaned, None

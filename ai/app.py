@@ -2,7 +2,8 @@
 
 SearXNG JSON API: SEARXNG_URL (default http://localhost:8080 on host; http://searxng:8080 in compose).
 Go math engine URL: GO_MATH_URL (default http://localhost:8081 for host dev).
-Gemini: GEMINI_API_KEY + optional GEMINI_MODEL (default gemini-2.0-flash).
+Gemini: GEMINI_API_KEY + optional GEMINI_MODEL (default gemini-2.5-flash; URL context on SearXNG URLs).
+Optional pacing: GEMINI_RETRY_BACKOFF_* , GEMINI_PREFLIGHT_DELAY_SEC, GEMINI_BETWEEN_AGENTS_SEC, etc. (see .env.example).
 SEC EDGAR: SEC_USER_AGENT must identify your deployment (SEC policy).
 Market history: yfinance (no Alpaca).
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import queue
 import re
@@ -36,7 +38,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 GO_MATH_URL = os.environ.get("GO_MATH_URL", "http://localhost:8081").rstrip("/")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080").rstrip("/")
 
-_DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+_DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
 def _clean_secret(value: str | None) -> str | None:
@@ -85,6 +87,16 @@ class ReportPdfPayload(BaseModel):
 
 def create_app() -> Flask:
     app = Flask(__name__)
+
+    level_name = (os.environ.get("LOG_LEVEL") or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        force=True,
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     @app.after_request
     def _cors(response: Response) -> Response:
@@ -271,8 +283,19 @@ def create_app() -> Flask:
         threading.Thread(target=worker, daemon=True).start()
 
         def event_iter():
+            # Gunicorn sync workers enforce ``timeout`` on *silence* from this iterator.
+            # Long phases (e.g. Gemini + tools) may not enqueue events for minutes; without
+            # periodic yields the master kills the worker with WORKER TIMEOUT while blocked
+            # on ``queue.get()``. SSE comment lines are ignored by EventSource clients.
+            heartbeat_sec = float(os.environ.get("SSE_HEARTBEAT_SEC", "20"))
+            if heartbeat_sec <= 0:
+                heartbeat_sec = 20.0
             while True:
-                item = out_q.get()
+                try:
+                    item = out_q.get(timeout=heartbeat_sec)
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+                    continue
                 if item is None:
                     break
                 yield f"data: {json.dumps(item, default=str)}\n\n"

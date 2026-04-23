@@ -21,8 +21,21 @@ services:
       GO_MATH_URL: http://backend:8080
       SEARXNG_URL: http://searxng:8080
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       SEC_USER_AGENT: "${SEC_USER_AGENT:-ProjectSentinel/1.0 (mailto:dev@localhost)}"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SEARXNG_CLIENT_IP: ${SEARXNG_CLIENT_IP:-127.0.0.1}
+      SEARXNG_QUERY_DELAY_SEC: ${SEARXNG_QUERY_DELAY_SEC:-0.35}
+      SSE_HEARTBEAT_SEC: ${SSE_HEARTBEAT_SEC:-20}
+      GEMINI_RETRY_BACKOFF_BASE_SEC: ${GEMINI_RETRY_BACKOFF_BASE_SEC:-5}
+      GEMINI_RETRY_BACKOFF_MULT: ${GEMINI_RETRY_BACKOFF_MULT:-2}
+      GEMINI_RETRY_BACKOFF_MAX_SEC: ${GEMINI_RETRY_BACKOFF_MAX_SEC:-120}
+      GEMINI_PREFLIGHT_DELAY_SEC: ${GEMINI_PREFLIGHT_DELAY_SEC:-2}
+      GEMINI_BETWEEN_TOOL_PRESETS_SEC: ${GEMINI_BETWEEN_TOOL_PRESETS_SEC:-5}
+      GEMINI_BETWEEN_AGENTS_SEC: ${GEMINI_BETWEEN_AGENTS_SEC:-8}
+      GEMINI_PDF_REPAIR_STAGGER_BASE_SEC: ${GEMINI_PDF_REPAIR_STAGGER_BASE_SEC:-12}
+      GEMINI_PDF_REPAIR_STAGGER_MAX_SEC: ${GEMINI_PDF_REPAIR_STAGGER_MAX_SEC:-60}
+      PEER_REVIEW_ROUNDS: ${PEER_REVIEW_ROUNDS:-2}
     depends_on:
       - backend
       - searxng
@@ -50,8 +63,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # Compose-specific settings; see infra/searxng/searxng.settings.yml
-      - ./infra/searxng/searxng.settings.yml:/etc/searxng/settings.yml
+      # Compose-specific settings (writable in-repo copy); legacy: searxng.settings.yml
+      - ./infra/searxng/searxng.settings.compose.yml:/etc/searxng/settings.yml
       - ./infra/searxng/limiter.toml:/etc/searxng/limiter.toml
       - searxng_data:/var/cache/searxng
     networks:

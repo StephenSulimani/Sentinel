@@ -10,6 +10,10 @@ ipv6_prefix = 48
 trusted_proxies = [
   '127.0.0.0/8',
   '::1',
+  # Docker default bridge / internal networks (other containers calling SearXNG).
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
 ]
 
 [botdetection.ip_limit]
@@ -21,6 +25,10 @@ link_token = false
 
 block_ip = []
 
-pass_ip = []
+pass_ip = [
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+]
 
 pass_searxng_org = true
