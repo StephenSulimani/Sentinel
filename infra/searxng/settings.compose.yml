@@ -1,0 +1,25 @@
+# SearXNG settings for Docker Compose (writable in-repo copy).
+# Mount as /etc/searxng/settings.yml — see docker-compose.yml
+#
+# Do NOT set public_instance: true without Valkey.
+use_default_settings: true
+
+engines:
+  - name: wikidata
+    disabled: true
+  - name: ahmia
+    disabled: true
+  - name: torch
+    disabled: true
+
+general:
+  instance_name: "Project Sentinel (dev)"
+search:
+  formats:
+    - html
+    - json
+server:
+  secret_key: "dev-secret-key-replace-for-any-non-local-use-min-32-chars"
+  limiter: false
+  image_proxy: false
+  public_instance: false

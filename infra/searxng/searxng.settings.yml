@@ -1,0 +1,23 @@
+# SearXNG settings for Docker Compose — mount as /etc/searxng/settings.yml
+#
+# `engines.remove` drops engines entirely (no init), unlike `disabled` which can
+# still run init on some versions — fixes wikidata KeyError / Tor engine noise.
+# Do NOT set public_instance: true without Valkey.
+use_default_settings:
+  engines:
+    remove:
+      - wikidata
+      - ahmia
+      - torch
+
+general:
+  instance_name: "Project Sentinel (dev)"
+search:
+  formats:
+    - html
+    - json
+server:
+  secret_key: "dev-secret-key-replace-for-any-non-local-use-min-32-chars"
+  limiter: false
+  image_proxy: false
+  public_instance: false

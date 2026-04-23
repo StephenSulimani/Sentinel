@@ -1,0 +1,96 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{ {{ company_name | latex }} ({{ ticker | latex }}) --- Equity research note}
+\author{Equity Research}
+\date{ {{ report_date | latex }} }
+
+\begin{document}
+\maketitle
+
+\section{Executive summary}
+This extended deterministic note on \textbf{ {{ ticker | latex }} } (\textbf{ {{ company_name | latex }} }) is assembled from public sources: SEC EDGAR for issuer identity and selected annual facts (where a compliant user agent is configured), delayed market prices and consensus price targets when available from the data vendor, a broad headline scan for recent narrative context, and an illustrative five-year discounted cash-flow sensitivity (not a published fair value). The document is suitable for internal triage and gap analysis---not for distribution as investment advice.
+
+\section{Company snapshot}
+{% if snapshot_rows %}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Field} & \textbf{Value} \\
+\midrule
+{% for label, value in snapshot_rows %}
+{{ label | latex }} & {{ value | latex }} \\
+{% endfor %}
+\bottomrule
+\end{tabular}
+\end{center}
+{% else %}
+\emph{No snapshot rows.}
+{% endif %}
+
+\section{Methodology and data coverage}
+\textbf{SEC EDGAR:} CIK resolution, recent filing index, and summarized company facts (operating cash flow tag when present) inform the cash-flow scale for the valuation bridge. \textbf{Market data:} delayed OHLCV and consensus mean price target when exposed by the vendor feed. \textbf{Headline scan:} snippets are unverified---confirm against primary sources before trading or compliance use. \textbf{Cash-flow illustration:} discount rate is inferred for mechanical sensitivity (see valuation table); the projected path applies a fixed +3\%/yr growth from the chosen base for illustration only.
+
+\section{Investment thesis}
+{{ thesis | latex }}
+
+\section{Key risks}
+{{ risks | latex }}
+
+\section{Recent headlines and narrative}
+{% if headlines %}
+\begin{itemize}
+{% for h in headlines %}
+\item \textbf{ {{ h.title | latex }} } --- {{ h.content | latex }}{% if h.url %} \textit{(URL: {{ h.url | latex }})}{% endif %}
+{% endfor %}
+\end{itemize}
+{% else %}
+\emph{No headlines retrieved (search unavailable or empty).}
+{% endif %}
+
+\section{Valuation snapshot (DCF / NPV bridge)}
+\begin{center}
+\begin{tabular}{@{}p{2.6in}p{3.2in}@{}}
+\toprule
+\textbf{Item} & \textbf{Value} \\
+\midrule
+{% for label, value in dcf_summary_rows %}
+{{ label | latex }} & {{ value | latex }} \\
+{% endfor %}
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Price target}
+{% if price_target_usd is not none %}
+\textbf{USD price target:} {{ "%.2f"|format(price_target_usd) }} per share.
+{% if price_target_horizon_months is not none %}
+\textbf{Horizon:} {{ price_target_horizon_months }} months.
+{% endif %}
+\textbf{Basis:} {{ price_target_basis | latex }}
+{% else %}
+\emph{No price target in this deterministic run (no consensus mean in the market feed). Enable the narrative analyst path for a modeled target, or verify upstream data.}
+{% endif %}
+
+\section{Monitoring and next steps}
+\begin{itemize}
+\item Re-run with the narrative analyst API enabled for a fuller sell-side-style PDF on the same underlying inputs.
+\item Expand extracted filing facts (additional XBRL tags), add primary filings (10-K MD\&A excerpts), and build a proper DCF / comps workbook before any external circulation.
+\item Validate every headline at the publisher; headlines can be stale or mis-ranked.
+\end{itemize}
+
+\section*{Disclaimer}
+This note is generated automatically from public sources and an illustrative cash-flow bridge. It is \textbf{not} investment advice, not a recommendation, and not suitable for any particular investor.
+
+\begin{thebibliography}{9}
+\bibitem{md}
+Market data vendor: delayed quote, historical prices, and consensus targets when available.
+\bibitem{sec}
+U.S.\ Securities and Exchange Commission EDGAR: issuer metadata, filings index, and company facts API.
+\bibitem{news}
+Headline scan: snippets only; verify originals at source.
+\end{thebibliography}
+
+\end{document}
