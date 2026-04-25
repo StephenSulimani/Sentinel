@@ -17,7 +17,10 @@ services:
         required: false
     ports:
       - "8000:8000"
+    volumes:
+      - ./data/ai:/app/data
     environment:
+      AI_DATA_DIR: /app/data
       GO_MATH_URL: http://backend:8080
       SEARXNG_URL: http://searxng:8080
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -54,6 +57,8 @@ services:
     environment:
       VITE_BACKEND_URL: http://localhost:8081
       VITE_AI_URL: http://localhost:8000
+      # VITE_BACKEND_URL: http://suli-fedora:8081
+      # VITE_AI_URL: http://suli-fedora:8000
     networks:
       - sentinel
 

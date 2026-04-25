@@ -26,6 +26,9 @@ from flask import Flask, Response, jsonify, request
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field, ValidationError
 
+from auth_api import init_auth, register_auth_routes
+from extensions import db
+import models  # noqa: F401 — register ORM metadata before create_all
 from latex_pdf import compile_latex_pdf_with_repair, pdflatex_available
 from report_builder import ReportResult, latex_escape, result_to_json_dict
 from research_pipeline import generate_full_report
@@ -85,8 +88,23 @@ class ReportPdfPayload(BaseModel):
     response_format: Literal["pdf", "json"] = "pdf"
 
 
+def _database_uri() -> str:
+    explicit = (os.environ.get("DATABASE_URL") or "").strip()
+    if explicit:
+        return explicit
+    data_dir = Path(os.environ.get("AI_DATA_DIR", str(_REPO_ROOT / "data"))).resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = data_dir / "ai_app.db"
+    return f"sqlite:///{db_path.as_posix()}"
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
+    app.config["SQLALCHEMY_DATABASE_URI"] = _database_uri()
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
+    register_auth_routes(app)
+    init_auth(app)
 
     level_name = (os.environ.get("LOG_LEVEL") or "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
@@ -101,8 +119,8 @@ def create_app() -> Flask:
     @app.after_request
     def _cors(response: Response) -> Response:
         response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
         return response
 
     @app.before_request

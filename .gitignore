@@ -8,3 +8,5 @@ frontend/.env
 __pycache__/
 .venv/
 *.tsbuildinfo
+# Local SQLite (Docker bind-mount uses ./data/ai)
+data/

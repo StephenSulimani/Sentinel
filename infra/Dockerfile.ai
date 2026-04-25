@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY ai/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY ai/ .
+RUN mkdir -p /app/data
 EXPOSE 8000
 # Long narrative runs; ``app.report_stream`` emits SSE comment heartbeats so sync workers
 # are not killed during silent phases. Timeout is a back-stop for truly stuck workers.
