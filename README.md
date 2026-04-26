@@ -1,7 +1,9 @@
 # Sentinel
 **Institutional-Grade Equity Analysis Powered by Multi-Agent AI**
 
-Developed by **Noah Cortes, Ethan Goebel, and Stephen Sulimani** *MGT8803: Generative AI in Finance — Georgia Institute of Technology* *Instructor: Dr. Sudheer Chava*
+Developed by **Noah Cortes, Ethan Goebel, and Stephen Sulimani**
+
+*MGT8803: Generative AI in Finance — Georgia Institute of Technology* *Instructor: Dr. Sudheer Chava*
 
 ---
 
